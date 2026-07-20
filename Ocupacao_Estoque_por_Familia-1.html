@@ -55,6 +55,17 @@
   .bar-disp { height:100%; background:var(--green); border-radius:6px; }
   .resumo-nums { font-size:11.5px; color:var(--muted); }
   .note { font-size:12px; color:var(--muted); border-top:1px solid var(--border); margin-top:14px; padding-top:10px; line-height:1.5; }
+  .btn { background:var(--primary); color:#fff; padding:9px 16px; border-radius:10px; font-weight:800; cursor:pointer; font-size:13px; border:none; }
+  .audit-actions { margin:0 0 18px; display:flex; justify-content:flex-end; }
+  .audit-panel { margin-bottom:18px; display:none; }
+  .audit-panel.open { display:block; }
+  .audit-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:12px; }
+  .audit-card { border:1px solid var(--border); border-radius:10px; padding:10px; background:#f8fafc; }
+  .audit-card .label { color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; }
+  .audit-card .value { font-size:20px; font-weight:900; margin-top:2px; }
+  .audit-table-wrap { max-height:360px; overflow:auto; border:1px solid var(--border); border-radius:10px; }
+  .audit-divergence td { background:#fee2e2; color:#991b1b; font-weight:700; }
+  @media (max-width:900px) { .audit-grid { grid-template-columns:repeat(2,1fr); } }
   h3 { margin:0 0 12px; font-size:14px; color:var(--primary); text-transform:uppercase; letter-spacing:.04em; }
   @media (max-width:900px) { .layout { grid-template-columns:1fr; } .kpis { grid-template-columns:repeat(2,1fr); } }
 </style>
@@ -73,6 +84,9 @@
     <button class="btn" id="clearBtn" style="background:#b91c1c;border:none;cursor:pointer;">Limpar estoque</button>
     <span id="fileState">Carregado: estoque enviado anteriormente (posição, quantidade por localização).</span>
   </div>
+
+  <div class="audit-actions"><button class="btn" id="auditBtn">🔍 AUDITORIA DA LÓGICA</button></div>
+  <div class="panel audit-panel" id="auditPanel"></div>
 
   <div class="kpis" id="kpiRow"></div>
 
@@ -108,8 +122,8 @@
 
   <div class="panel note">
     <b>Notas do especialista:</b><br>
-    • Capacidade e Família vêm da base de cadastro (base_1.xlsx). Ocupado é calculado cruzando cada posição com o saldo do arquivo de Estoque importado, limitado à capacidade da posição.<br>
-    • Se o CSV importado tiver uma coluna LABEL ou ETIQUETA, ela passa a mandar (igual à lógica do Excel =SE(F2="";"LIVRE";"OCUP")): posição com etiqueta preenchida = OCUP, etiqueta vazia = LIVRE, mesmo com saldo residual. Se não houver LABEL/ETIQUETA mas houver uma coluna STATUS (OCUP/LIVRE, como na base do WMS), essa coluna manda no lugar. Sem nenhuma das duas, o cálculo continua só pela quantidade.<br>
+    • Capacidade e Família vêm da base de cadastro (Base do Excel). Ocupado é contagem de posições/localizações ocupadas, sem somar peças e sem duplicar localização.<br>
+    • A ocupação segue a referência do Excel: <code>=SE(LABEL2="";"LIVRE";"OCUP")</code>. Se LABEL2 estiver preenchida, a posição conta como OCUPADA; se LABEL2 estiver vazia, conta como LIVRE, independentemente da QUANTIDADE.<br>
     • Posições com CAPACITY = -1 já foram descartadas por não serem endereços de armazenagem válidos.<br>
     • 54 posições (234 de capacidade) não têm Tipo de Armazenagem/Família classificados na base e ficam fora deste recorte.<br>
     • Para atualizar a ocupação, clique em "Importar novo Estoque" e selecione o CSV de saldo por localização — o painel recalcula tudo na hora, sem precisar de outra ferramenta.<br>
@@ -172,52 +186,102 @@ function splitCSVLine(line) {
   return result;
 }
 
-function parseEstoqueCSV(text) {
-  const lines = text.split(/\r?\n/);
-  const header = (lines[0] || '');
-  const headerCols = splitCSVLine(header).map(h => h.trim());
-  // Regra pedida pelo usuário (igual ao Excel =SE(F2="";"LIVRE";"OCUP")):
-  // se a coluna LABEL/ETIQUETA tiver conteúdo, a posição está OCUP; se estiver vazia, LIVRE.
-  const labelColIdx = headerCols.findIndex(h => /^(label|etiqueta)$/i.test(h));
-  const hasLabelColumn = labelColIdx !== -1;
-  const hasStatusColumn = !hasLabelColumn && /\bstatus\b/i.test(header);
-  const qtyByPos = new Map();
-  const statusByPos = new Map(); // loc -> 'OCUP' | 'LIVRE' | null
-  let minDate = null, maxDate = null;
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const m = line.match(QTY_RE);
-    if (m) {
-      const loc = m[1];
-      const qty = parseFloat(m[2].replace(',', '.'));
+function normalizeHeaderName(value) {
+  return (value || '').toString().trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
 
-      let statusOK = true; // por padrão, soma a quantidade (comportamento antigo)
-      if (hasLabelColumn) {
-        const fields = splitCSVLine(line);
-        const labelVal = (fields[labelColIdx] || '').trim();
-        const status = labelVal ? 'OCUP' : 'LIVRE';
-        statusByPos.set(loc, status);
-        // Se a etiqueta estiver vazia, a posição NÃO conta como ocupada, mesmo com saldo residual.
-        if (status === 'LIVRE') statusOK = false;
-      } else if (hasStatusColumn) {
-        const sm = line.match(STATUS_RE);
-        const status = sm ? sm[1].toUpperCase() : null;
-        if (status) statusByPos.set(loc, status);
-        // Regra: se o WMS marcou a posição como LIVRE, ela NÃO conta como ocupada,
-        // mesmo que ainda exista um saldo residual (arredondamento/pendência de baixa).
-        if (status === 'LIVRE') statusOK = false;
-      }
+function detectDelimiter(header) {
+  const semicolons = (header.match(/;/g) || []).length;
+  const commas = (header.match(/,/g) || []).length;
+  return semicolons > commas ? ';' : ',';
+}
 
-      if (statusOK) {
-        qtyByPos.set(loc, (qtyByPos.get(loc) || 0) + (isFinite(qty) ? qty : 0));
-      } else if (!qtyByPos.has(loc)) {
-        qtyByPos.set(loc, 0);
+function parseDelimitedLine(line, delimiter) {
+  if (delimiter === ',') return splitCSVLine(line);
+  const result = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else {
+        cur += ch;
       }
     } else {
-      const m2 = line.match(EMPTY_RE);
-      if (m2 && !qtyByPos.has(m2[1])) qtyByPos.set(m2[1], 0);
+      if (ch === '"') inQuotes = true;
+      else if (ch === delimiter) { result.push(cur); cur = ''; }
+      else cur += ch;
     }
+  }
+  result.push(cur);
+  return result;
+}
+
+function findColumn(headerCols, aliases) {
+  const normalizedAliases = aliases.map(normalizeHeaderName);
+  return headerCols.findIndex(h => normalizedAliases.includes(normalizeHeaderName(h)));
+}
+
+function parseNumber(value) {
+  const raw = (value || '').toString().trim();
+  if (!raw) return 0;
+  const normalized = raw.includes(',') ? raw.replace(/\./g, '').replace(',', '.') : raw;
+  const parsed = parseFloat(normalized);
+  return isFinite(parsed) ? parsed : 0;
+}
+
+function parseEstoqueCSV(text) {
+  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+  const header = (lines[0] || '');
+  const delimiter = detectDelimiter(header);
+  const headerCols = parseDelimitedLine(header, delimiter).map(h => h.trim());
+  const locColIdx = findColumn(headerCols, ['name', 'localização', 'localizacao', 'layout']);
+  const label2ColIdx = findColumn(headerCols, ['label2']);
+  const qtyColIdx = findColumn(headerCols, ['quantity', 'quantidade', 'qtd']);
+  const labelColIdx = findColumn(headerCols, ['label', 'etiqueta']);
+  const statusColIdx = findColumn(headerCols, ['status']);
+  const hasLabel2Column = label2ColIdx !== -1;
+  const hasLabelColumn = labelColIdx !== -1;
+  const hasStatusColumn = statusColIdx !== -1;
+  const qtyByPos = new Map();
+  const statusByPos = new Map();
+  const label2ByPos = new Map();
+  const labelByPos = new Map();
+  const duplicateRowsByPos = new Map();
+  let duplicateRows = 0;
+  let unclassifiedRows = 0;
+  let minDate = null, maxDate = null;
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const fields = parseDelimitedLine(line, delimiter);
+    const loc = ((locColIdx !== -1 ? fields[locColIdx] : '') || '').trim();
+    if (!loc) continue;
+    if (qtyByPos.has(loc)) {
+      duplicateRows++;
+      duplicateRowsByPos.set(loc, (duplicateRowsByPos.get(loc) || 0) + 1);
+    }
+    const qty = qtyColIdx !== -1 ? parseNumber(fields[qtyColIdx]) : 0;
+    qtyByPos.set(loc, (qtyByPos.get(loc) || 0) + qty);
+
+    const label2Val = label2ColIdx !== -1 ? ((fields[label2ColIdx] || '').trim()) : '';
+    const labelVal = labelColIdx !== -1 ? ((fields[labelColIdx] || '').trim()) : '';
+    if (label2Val) label2ByPos.set(loc, label2Val);
+    if (labelVal) labelByPos.set(loc, labelVal);
+
+    let status = null;
+    if (hasLabel2Column) status = label2Val ? 'OCUP' : 'LIVRE';
+    else if (hasStatusColumn) status = ((fields[statusColIdx] || '').trim().toUpperCase() || null);
+    else if (hasLabelColumn) status = labelVal ? 'OCUP' : 'LIVRE';
+    else status = qty > 0 ? 'OCUP' : 'LIVRE';
+    if (!status || !/^(OCUP|LIVRE)$/.test(status)) unclassifiedRows++;
+    else if (status === 'OCUP' || !statusByPos.has(loc)) statusByPos.set(loc, status);
+
     let dm;
     DATE_RE.lastIndex = 0;
     while ((dm = DATE_RE.exec(line)) !== null) {
@@ -228,28 +292,31 @@ function parseEstoqueCSV(text) {
       }
     }
   }
-  return { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, statusByPos };
+  return { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, hasLabel2Column, statusByPos, label2ByPos, labelByPos, duplicateRows, duplicateRowsByPos, unclassifiedRows };
 }
-
 // Mutable working copies so the base file can be swapped without touching the embedded defaults
 let CURRENT_GROUPS = GROUPS.slice();
 let CURRENT_POSITIONS = POSITIONS.slice();
 
-function computeGroups(qtyByPos) {
+function computeGroups(stock) {
+  const statusByPos = stock && stock.statusByPos ? stock.statusByPos : null;
+  const qtyByPos = stock && stock.qtyByPos ? stock.qtyByPos : stock;
   const agg = CURRENT_GROUPS.map(g => ({ tipo: g.tipo, familia: g.familia, capacidade: 0, ocupado: 0 }));
+  const counted = new Set();
   for (const [loc, gi, cap] of CURRENT_POSITIONS) {
-    if (!agg[gi]) continue;
+    if (!agg[gi] || counted.has(loc)) continue;
+    counted.add(loc);
     agg[gi].capacidade += cap;
-    const qty = qtyByPos.get(loc) || 0;
-    agg[gi].ocupado += (qty > 0) ? Math.min(cap, qty) : 0;
+    const occupied = statusByPos ? statusByPos.get(loc) === 'OCUP' : ((qtyByPos && qtyByPos.get(loc)) || 0) > 0;
+    if (occupied) agg[gi].ocupado += 1;
   }
   return agg;
 }
 
 // Parses a family/capacity base file (xlsx or csv) with columns similar to:
 // Localização, almacen, TIPO DE ARMAZENAGEM, FAMILIA, CAPACIDADE (case/accent-insensitive, any column order)
-function render(qtyByPos, meta) {
-  const agg = computeGroups(qtyByPos);
+function render(stock, meta) {
+  const agg = computeGroups(stock);
 
   // group by tipo preserving order
   const byTipo = new Map();
@@ -347,9 +414,8 @@ function render(qtyByPos, meta) {
 
 // initial render with default (previously supplied) stock snapshot
 const defaultQtyMap = new Map(DEFAULT_QTY);
-render(defaultQtyMap, null);
-
-let CURRENT_QTY = defaultQtyMap;
+let CURRENT_STOCK = { qtyByPos: defaultQtyMap, statusByPos: null };
+render(CURRENT_STOCK, null);
 
 document.getElementById('estoqueInput').addEventListener('change', function(e) {
   const file = e.target.files[0];
@@ -357,13 +423,16 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
   document.getElementById('fileState').textContent = 'Lendo ' + file.name + '...';
   const reader = new FileReader();
   reader.onload = function(ev) {
-    const { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn } = parseEstoqueCSV(ev.target.result);
-    CURRENT_QTY = qtyByPos;
-    render(CURRENT_QTY, { minDate, maxDate });
+    const parsed = parseEstoqueCSV(ev.target.result);
+    const { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, hasLabel2Column } = parsed;
+    CURRENT_STOCK = parsed;
+    render(CURRENT_STOCK, { minDate, maxDate });
     document.getElementById('fileState').textContent =
       'Carregado: ' + file.name + ' — ' + qtyByPos.size + ' posições lidas' +
-      (hasLabelColumn
-        ? ' (coluna LABEL/ETIQUETA detectada: posição com etiqueta preenchida = OCUP; vazia = LIVRE, mesmo com saldo residual).'
+      (hasLabel2Column
+        ? ' (coluna LABEL2 detectada: regra Excel aplicada — LABEL2 preenchida = OCUP; vazia = LIVRE).'
+        : hasLabelColumn
+        ? ' (coluna LABEL/ETIQUETA detectada como fallback: preenchida = OCUP; vazia = LIVRE).'
         : hasStatusColumn
         ? ' (coluna STATUS detectada: posições marcadas LIVRE não contam como ocupadas, mesmo com saldo residual).'
         : ' (sem coluna LABEL/ETIQUETA ou STATUS neste arquivo — ocupação calculada só pela quantidade, como antes).');
@@ -372,11 +441,62 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
 });
 
 document.getElementById('clearBtn').addEventListener('click', function() {
-  CURRENT_QTY = new Map();
-  render(CURRENT_QTY, null);
+  CURRENT_STOCK = { qtyByPos: new Map(), statusByPos: null };
+  render(CURRENT_STOCK, null);
   document.getElementById('fileState').textContent =
     'Estoque limpo (capacidade e famílias continuam de pé). Importe um novo CSV de estoque para recalcular a ocupação.';
 });
+function buildAuditRows(stock) {
+  const qtyByPos = stock && stock.qtyByPos ? stock.qtyByPos : new Map();
+  const statusByPos = stock && stock.statusByPos ? stock.statusByPos : null;
+  const rows = [];
+  const seen = new Set();
+  let semClassificacao = 0;
+  for (const [loc, gi, cap] of CURRENT_POSITIONS) {
+    if (seen.has(loc)) continue;
+    seen.add(loc);
+    const group = CURRENT_GROUPS[gi] || { tipo: 'SEM CLASSIFICAÇÃO', familia: 'SEM CLASSIFICAÇÃO' };
+    if (!CURRENT_GROUPS[gi]) semClassificacao++;
+    const status = statusByPos ? (statusByPos.get(loc) || 'LIVRE') : (((qtyByPos.get(loc) || 0) > 0) ? 'OCUP' : 'LIVRE');
+    rows.push({
+      loc, tipo: group.tipo, familia: group.familia, capacidade: cap,
+      label2: stock && stock.label2ByPos ? (stock.label2ByPos.get(loc) || '') : '',
+      quantidade: qtyByPos.get(loc) || 0,
+      status, duplicadas: stock && stock.duplicateRowsByPos ? (stock.duplicateRowsByPos.get(loc) || 0) : 0,
+      divergente: statusByPos ? false : ((qtyByPos.get(loc) || 0) > 0 && !(stock && stock.label2ByPos && stock.label2ByPos.get(loc)))
+    });
+  }
+  return { rows, semClassificacao };
+}
+
+function renderAuditPanel() {
+  const panel = document.getElementById('auditPanel');
+  const { rows, semClassificacao } = buildAuditRows(CURRENT_STOCK);
+  const ocupadas = rows.filter(r => r.status === 'OCUP').length;
+  const livres = rows.length - ocupadas;
+  const duplicadas = CURRENT_STOCK.duplicateRows || 0;
+  const divergencias = rows.filter(r => r.divergente).length;
+  const sampleRows = rows.filter(r => r.status === 'OCUP' || r.duplicadas || r.divergente).slice(0, 300);
+  panel.innerHTML = `<h3>Auditoria da lógica</h3>
+    <div class="audit-grid">
+      <div class="audit-card"><div class="label">Posições analisadas</div><div class="value">${fmt(rows.length)}</div></div>
+      <div class="audit-card"><div class="label">Ocupadas</div><div class="value">${fmt(ocupadas)}</div></div>
+      <div class="audit-card"><div class="label">Livres</div><div class="value">${fmt(livres)}</div></div>
+      <div class="audit-card"><div class="label">Linhas duplicadas</div><div class="value">${fmt(duplicadas)}</div></div>
+      <div class="audit-card"><div class="label">Sem classificação</div><div class="value">${fmt(semClassificacao + (CURRENT_STOCK.unclassifiedRows || 0))}</div></div>
+      <div class="audit-card"><div class="label">Divergências</div><div class="value">${fmt(divergencias)}</div></div>
+    </div>
+    <div class="audit-table-wrap"><table><thead><tr><th>Localização</th><th>LABEL2</th><th class="num">Quantidade</th><th>Tipo</th><th>Família</th><th class="num">Capacidade</th><th>Status calculado</th><th>Duplicadas</th></tr></thead>
+    <tbody>${sampleRows.map(r => `<tr class="${r.divergente ? 'audit-divergence' : ''}"><td>${r.loc}</td><td>${r.label2 || ''}</td><td class="num">${fmt(r.quantidade)}</td><td>${r.tipo}</td><td>${r.familia}</td><td class="num">${fmt(r.capacidade)}</td><td>${r.status}</td><td class="num">${fmt(r.duplicadas)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="note">Amostra limitada a 300 linhas relevantes. Com LABEL2 importada, a divergência esperada é zero porque a regra oficial é LABEL2 preenchida = OCUP.</div>`;
+}
+
+document.getElementById('auditBtn').addEventListener('click', function() {
+  const panel = document.getElementById('auditPanel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) renderAuditPanel();
+});
+
 </script>
 </body>
 </html>
