@@ -298,25 +298,36 @@ function parseLayoutCSV(text) {
     if (!loc) continue;
     const cap = parseCapacity(fields[capacityIdx]);
     if (!isFinite(cap)) continue;
-    capacitiesByLoc.set(loc, cap === -1 ? 0 : cap);
-    if (cap === -1) invalidCount++;
+    if (cap === -1) {
+      capacitiesByLoc.set(loc, capacitiesByLoc.get(loc) || 0);
+      invalidCount++;
+    } else {
+      capacitiesByLoc.set(loc, (capacitiesByLoc.get(loc) || 0) + cap);
+    }
   }
   return { capacitiesByLoc, invalidCount };
 }
 
 function applyLayoutCapacities(capacitiesByLoc) {
-  const positionIndex = new Map(CURRENT_POSITIONS.map((pos, idx) => [pos[0], idx]));
+  const positionIndex = new Map();
+  CURRENT_POSITIONS.forEach((pos, idx) => {
+    const loc = pos[0];
+    if (!positionIndex.has(loc)) positionIndex.set(loc, []);
+    positionIndex.get(loc).push(idx);
+  });
   let updatedCount = 0;
   let ignoredCount = 0;
 
   capacitiesByLoc.forEach((cap, loc) => {
-    const idx = positionIndex.get(loc);
-    if (idx === undefined) {
+    const indexes = positionIndex.get(loc);
+    if (!indexes) {
       ignoredCount++;
       return;
     }
-    CURRENT_POSITIONS[idx][2] = cap;
-    updatedCount++;
+    indexes.forEach(idx => {
+      CURRENT_POSITIONS[idx][2] = cap;
+      updatedCount++;
+    });
   });
 
   return { updatedCount, ignoredCount };
