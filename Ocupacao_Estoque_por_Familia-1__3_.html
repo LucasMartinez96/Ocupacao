@@ -55,6 +55,7 @@
   .bar-disp { height:100%; background:var(--green); border-radius:6px; }
   .resumo-nums { font-size:11.5px; color:var(--muted); }
   .note { font-size:12px; color:var(--muted); border-top:1px solid var(--border); margin-top:14px; padding-top:10px; line-height:1.5; }
+  #diagnostics { white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; color:var(--text); background:#f8fafc; border:1px solid var(--border); border-radius:10px; padding:10px; margin-top:10px; max-height:220px; overflow:auto; }
   h3 { margin:0 0 12px; font-size:14px; color:var(--primary); text-transform:uppercase; letter-spacing:.04em; }
   @media (max-width:900px) { .layout { grid-template-columns:1fr; } .kpis { grid-template-columns:repeat(2,1fr); } }
 
@@ -135,10 +136,11 @@
     • Capacidade pode ser atualizada via CSV de Layout; Família é sempre definida pelo mapa interno fixo da ferramenta (Posição → Família/Tipo de Armazenagem) e nunca é alterada pela importação. Ocupado é calculado cruzando cada posição com o saldo do arquivo de Estoque importado, limitado à capacidade da posição.<br>
     • Se o CSV importado tiver uma coluna LABEL ou ETIQUETA, ela passa a mandar (igual à lógica do Excel =SE(F2="";"LIVRE";"OCUP")): posição com etiqueta preenchida = OCUP, etiqueta vazia = LIVRE, mesmo com saldo residual. Se não houver LABEL/ETIQUETA mas houver uma coluna STATUS (OCUP/LIVRE, como na base do WMS), essa coluna manda no lugar. Sem nenhuma das duas, o cálculo continua só pela quantidade.<br>
     • Posições com CAPACITY = -1 já foram descartadas por não serem endereços de armazenagem válidos.<br>
-    • 54 posições (234 de capacidade) não têm Tipo de Armazenagem/Família classificados na base e ficam fora deste recorte.<br>
-    • Para atualizar a ocupação, clique em "Importar novo Estoque" e selecione o CSV de saldo por localização. Para atualizar somente capacidades, clique em "Importar Layout (atualizar capacidades)"; localizações ausentes no Layout mantêm a capacidade anterior e localizações não cadastradas no mapa interno são ignoradas.<br>
+    • Posições válidas sem Tipo de Armazenagem/Família no mapa interno não são descartadas: elas entram no total em SEM CLASSIFICAÇÃO para preservar a capacidade oficial do Layout.<br>
+    • Para atualizar a ocupação, clique em "Importar novo Estoque" e selecione o CSV de saldo por localização. Para atualizar somente capacidades, clique em "Importar Layout (atualizar capacidades)"; o novo Layout substitui integralmente o mapa de capacidade anterior. Toda linha cuja localização comece com 1-, 2-, 3- ou 4- é tratada como endereço válido; colunas informativas, como "Quantidade de posições", são ignoradas. Localizações válidas sem Tipo/Família no mapa interno entram no total como SEM CLASSIFICAÇÃO para não reduzir a capacidade.<br>
     • Leitura rápida: <span class="pct-ok" style="padding:1px 5px;border-radius:4px;">verde</span> = folga saudável, <span class="pct-warn" style="padding:1px 5px;border-radius:4px;">amarelo</span> = atenção, <span class="pct-crit" style="padding:1px 5px;border-radius:4px;">vermelho</span> = perto do limite (&gt;90%), risco de gargalo.
     <div id="freshness" style="margin-top:6px;"></div>
+    <div id="diagnostics"></div>
   </div>
 </div>
 
@@ -196,51 +198,76 @@ function splitCSVLine(line, delimiter = ',') {
   return result;
 }
 
+function normalizeLocation(value) {
+  return (value || '').trim().replace(/\s+/g, '').toUpperCase();
+}
+
+function isValidLayoutLocation(loc) {
+  return /^[1-4]-/.test(loc);
+}
+
+function summarizeLocationMap(map) {
+  const unique = new Set();
+  let rows = 0;
+  map.forEach(items => { rows += items.length; unique.add(items[0].normalizada); });
+  return { rows, unique: unique.size };
+}
+
 function parseEstoqueCSV(text) {
   const lines = text.split(/\r?\n/);
   const header = (lines[0] || '');
   const headerCols = splitCSVLine(header).map(h => h.trim());
-  // Regra pedida pelo usuário (igual ao Excel =SE(F2="";"LIVRE";"OCUP")):
-  // se a coluna LABEL/ETIQUETA tiver conteúdo, a posição está OCUP; se estiver vazia, LIVRE.
+  const normalizedHeaders = headerCols.map(normalizeHeader);
   const labelColIdx = headerCols.findIndex(h => /^(label|etiqueta)$/i.test(h));
+  const locColIdx = normalizedHeaders.findIndex(h => ['layout','localizacao','localization','location','loc','name','posicao','endereco'].includes(h));
+  const qtyColIdx = normalizedHeaders.findIndex(h => ['quantity','quantidade','qty','saldo'].includes(h));
   const hasLabelColumn = labelColIdx !== -1;
   const hasStatusColumn = !hasLabelColumn && /\bstatus\b/i.test(header);
   const qtyByPos = new Map();
-  const statusByPos = new Map(); // loc -> 'OCUP' | 'LIVRE' | null
+  const stockRowsByLoc = new Map();
+  const statusByPos = new Map();
+  let totalRows = 0;
   let minDate = null, maxDate = null;
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
-    const m = line.match(QTY_RE);
-    if (m) {
-      const loc = m[1];
-      const qty = parseFloat(m[2].replace(',', '.'));
+    const parsedFields = (locColIdx !== -1 && qtyColIdx !== -1) ? splitCSVLine(line) : null;
+    const parsedLoc = parsedFields ? (parsedFields[locColIdx] || '').trim() : '';
+    const parsedQty = parsedFields ? parseCapacity(parsedFields[qtyColIdx]) : NaN;
+    const m = parsedLoc ? null : line.match(QTY_RE);
+    if (parsedLoc || m) {
+      totalRows++;
+      const originalLoc = parsedLoc || m[1];
+      const loc = normalizeLocation(originalLoc);
+      const qty = parsedLoc ? parsedQty : parseFloat(m[2].replace(',', '.'));
+      if (!stockRowsByLoc.has(loc)) stockRowsByLoc.set(loc, []);
+      stockRowsByLoc.get(loc).push({ linha: i + 1, localizacaoOriginal: originalLoc, normalizada: loc, quantidade: isFinite(qty) ? qty : 0 });
 
-      let statusOK = true; // por padrão, soma a quantidade (comportamento antigo)
+      let statusOK = true;
       if (hasLabelColumn) {
-        const fields = splitCSVLine(line);
+        const fields = parsedFields || splitCSVLine(line);
         const labelVal = (fields[labelColIdx] || '').trim();
         const status = labelVal ? 'OCUP' : 'LIVRE';
         statusByPos.set(loc, status);
-        // Se a etiqueta estiver vazia, a posição NÃO conta como ocupada, mesmo com saldo residual.
         if (status === 'LIVRE') statusOK = false;
       } else if (hasStatusColumn) {
         const sm = line.match(STATUS_RE);
         const status = sm ? sm[1].toUpperCase() : null;
         if (status) statusByPos.set(loc, status);
-        // Regra: se o WMS marcou a posição como LIVRE, ela NÃO conta como ocupada,
-        // mesmo que ainda exista um saldo residual (arredondamento/pendência de baixa).
         if (status === 'LIVRE') statusOK = false;
       }
 
-      if (statusOK) {
-        qtyByPos.set(loc, (qtyByPos.get(loc) || 0) + (isFinite(qty) ? qty : 0));
-      } else if (!qtyByPos.has(loc)) {
-        qtyByPos.set(loc, 0);
-      }
+      if (statusOK) qtyByPos.set(loc, (qtyByPos.get(loc) || 0) + (isFinite(qty) ? qty : 0));
+      else if (!qtyByPos.has(loc)) qtyByPos.set(loc, 0);
     } else {
       const m2 = line.match(EMPTY_RE);
-      if (m2 && !qtyByPos.has(m2[1])) qtyByPos.set(m2[1], 0);
+      if (m2) {
+        totalRows++;
+        const loc = normalizeLocation(m2[1]);
+        if (!qtyByPos.has(loc)) qtyByPos.set(loc, 0);
+        if (!stockRowsByLoc.has(loc)) stockRowsByLoc.set(loc, []);
+        stockRowsByLoc.get(loc).push({ linha: i + 1, localizacaoOriginal: m2[1], normalizada: loc, quantidade: 0 });
+      }
     }
     let dm;
     DATE_RE.lastIndex = 0;
@@ -252,7 +279,7 @@ function parseEstoqueCSV(text) {
       }
     }
   }
-  return { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, statusByPos };
+  return { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, statusByPos, totalRows, stockRowsByLoc };
 }
 
 function detectDelimiter(header) {
@@ -280,79 +307,189 @@ function parseCapacity(value) {
 }
 
 function parseLayoutCSV(text) {
-  const lines = text.split(/\r?\n/).filter(line => line.trim());
-  const header = lines[0] || '';
+  const allLines = text.split(/\r?\n/);
+  const headerLineIndex = allLines.findIndex(line => line.trim());
+  const header = headerLineIndex >= 0 ? allLines[headerLineIndex] : '';
   const delimiter = detectDelimiter(header);
   const headerCols = splitCSVLine(header, delimiter).map(normalizeHeader);
-  const layoutIdx = headerCols.indexOf('layout');
-  const capacityIdx = headerCols.indexOf('capacity');
+  const layoutIdx = headerCols.findIndex(h => ['layout','localizacao','localization','location','loc','name','posicao','endereco'].includes(h));
+  const capacityIdx = headerCols.findIndex(h => ['capacity','capacidade'].includes(h));
   if (layoutIdx === -1 || capacityIdx === -1) {
-    throw new Error('CSV de Layout inválido: colunas obrigatórias "layout" e "CAPACITY" não encontradas.');
+    throw new Error('CSV de Layout inválido: colunas obrigatórias de localização (layout/localização) e capacidade (CAPACITY/CAPACIDADE) não encontradas.');
+  }
+
+  const rawRowsByLoc = new Map();
+  const discardReasons = new Map();
+  const prefixCounts = { '1-': 0, '2-': 0, '3-': 0, '4-': 0 };
+  let invalidMinusOneCount = 0, zeroCapacityCount = 0, rawCapacitySum = 0, validRows = 0, totalCsvRows = 0;
+  for (let i = headerLineIndex + 1; i < allLines.length; i++) {
+    const line = allLines[i];
+    if (!line || !line.trim()) continue;
+    totalCsvRows++;
+    const fields = splitCSVLine(line, delimiter);
+    const originalLoc = (fields[layoutIdx] || '').trim();
+    const loc = normalizeLocation(originalLoc);
+    const cap = parseCapacity(fields[capacityIdx]);
+    const addDiscard = reason => discardReasons.set(reason, (discardReasons.get(reason) || 0) + 1);
+
+    if (!loc) { addDiscard('localização vazia'); continue; }
+    if (!isValidLayoutLocation(loc)) { addDiscard('localização não começa com 1-, 2-, 3- ou 4-'); continue; }
+    if (!isFinite(cap)) { addDiscard('capacidade inválida/vazia'); continue; }
+    if (cap === -1) { invalidMinusOneCount++; addDiscard('CAPACITY = -1'); continue; }
+    if (cap === 0) { zeroCapacityCount++; addDiscard('CAPACITY = 0'); continue; }
+    if (cap < 0) { addDiscard('capacidade negativa diferente de -1'); continue; }
+
+    validRows++;
+    const prefix = loc.slice(0, 2);
+    if (prefixCounts[prefix] !== undefined) prefixCounts[prefix]++;
+    rawCapacitySum += cap;
+    if (!rawRowsByLoc.has(loc)) rawRowsByLoc.set(loc, []);
+    rawRowsByLoc.get(loc).push({ linha: i + 1, localizacaoOriginal: originalLoc, normalizada: loc, capacidade: cap });
   }
 
   const capacitiesByLoc = new Map();
-  let invalidCount = 0;
-  for (let i = 1; i < lines.length; i++) {
-    const fields = splitCSVLine(lines[i], delimiter);
-    const loc = (fields[layoutIdx] || '').trim();
-    if (!loc) continue;
-    const cap = parseCapacity(fields[capacityIdx]);
-    if (!isFinite(cap)) continue;
-    if (cap === -1) {
-      capacitiesByLoc.set(loc, capacitiesByLoc.get(loc) || 0);
-      invalidCount++;
-    } else {
-      capacitiesByLoc.set(loc, (capacitiesByLoc.get(loc) || 0) + cap);
+  const duplicateLocations = [];
+  const conflictingDuplicates = [];
+  rawRowsByLoc.forEach((rows, loc) => {
+    if (rows.length > 1) {
+      duplicateLocations.push(loc);
+      const caps = [...new Set(rows.map(r => r.capacidade))];
+      if (caps.length > 1) conflictingDuplicates.push({ loc, capacidades: caps, linhas: rows.map(r => r.linha) });
     }
+    // Cada endereço válido entra uma única vez no mapa final. A coluna informativa
+    // "Quantidade de posições" não participa desta rotina; somente localização e capacidade.
+    const chosen = rows[rows.length - 1];
+    capacitiesByLoc.set(loc, chosen);
+  });
+
+  const dedupedCapacitySum = [...capacitiesByLoc.values()].reduce((sum, row) => sum + row.capacidade, 0);
+  return { capacitiesByLoc, rawRowsByLoc, totalRows: totalCsvRows, validRows, uniqueLocations: rawRowsByLoc.size,
+    duplicateLocations, conflictingDuplicates, invalidMinusOneCount, zeroCapacityCount, rawCapacitySum,
+    dedupedCapacitySum, prefixCounts, discardedRows: totalCsvRows - validRows, discardReasons };
+}
+
+function buildClassificationMap(positions = CURRENT_POSITIONS) {
+  const map = new Map();
+  const duplicates = [];
+  positions.forEach(([originalLoc, gi, cap], idx) => {
+    const loc = normalizeLocation(originalLoc);
+    const row = { idx, localizacaoOriginal: originalLoc, normalizada: loc, gi, capacidadeBase: cap };
+    if (map.has(loc)) duplicates.push({ loc, anterior: map.get(loc), atual: row });
+    // Classificação duplicada também não deve multiplicar capacidade: última definição vence.
+    map.set(loc, row);
+  });
+  return { map, duplicates };
+}
+
+function getUnclassifiedGroupIndex() {
+  let idx = CURRENT_GROUPS.findIndex(g => g.tipo === 'SEM CLASSIFICAÇÃO' && g.familia === 'ENDEREÇOS VÁLIDOS DO LAYOUT');
+  if (idx === -1) {
+    CURRENT_GROUPS.push({ tipo: 'SEM CLASSIFICAÇÃO', familia: 'ENDEREÇOS VÁLIDOS DO LAYOUT' });
+    idx = CURRENT_GROUPS.length - 1;
   }
-  return { capacitiesByLoc, invalidCount };
+  return idx;
 }
 
-function applyLayoutCapacities(capacitiesByLoc) {
-  const positionIndex = new Map();
-  CURRENT_POSITIONS.forEach((pos, idx) => {
-    const loc = pos[0];
-    if (!positionIndex.has(loc)) positionIndex.set(loc, []);
-    positionIndex.get(loc).push(idx);
+function rebuildCentralMap(layoutData = null, qtyByPos = CURRENT_QTY) {
+  const { map: classMap, duplicates: classificationDuplicates } = buildClassificationMap();
+  const source = layoutData ? layoutData.capacitiesByLoc : new Map([...classMap].map(([loc, row]) => [loc, { localizacaoOriginal: row.localizacaoOriginal, normalizada: loc, capacidade: row.capacidadeBase }]));
+  const central = new Map();
+  source.forEach((capRow, loc) => {
+    let cls = classMap.get(loc);
+    if (!cls && layoutData && isValidLayoutLocation(loc)) cls = { localizacaoOriginal: capRow.localizacaoOriginal, normalizada: loc, gi: getUnclassifiedGroupIndex(), capacidadeBase: capRow.capacidade };
+    if (!cls) return;
+    const group = CURRENT_GROUPS[cls.gi];
+    if (!group || !(capRow.capacidade > 0)) return;
+    const rawOcc = qtyByPos.get(loc) || 0;
+    const ocupado = Math.max(0, Math.min(capRow.capacidade, rawOcc));
+    central.set(loc, { localizacaoOriginal: capRow.localizacaoOriginal || cls.localizacaoOriginal, capacidade: capRow.capacidade,
+      tipoArmazenagem: group.tipo, familia: group.familia, ocupado, rawOcupado: rawOcc, classificado: classMap.has(loc) });
   });
-  let updatedCount = 0;
-  let ignoredCount = 0;
-
-  capacitiesByLoc.forEach((cap, loc) => {
-    const indexes = positionIndex.get(loc);
-    if (!indexes) {
-      ignoredCount++;
-      return;
-    }
-    indexes.forEach(idx => {
-      CURRENT_POSITIONS[idx][2] = cap;
-      updatedCount++;
-    });
-  });
-
-  return { updatedCount, ignoredCount };
+  CURRENT_LOCATION_MAP = central;
+  return { central, classificationDuplicates };
 }
 
-// Mutable working copies: Layout imports update only capacity, never the fixed family/type mapping.
+function applyLayoutCapacities(layoutData) {
+  CURRENT_LAYOUT_DATA = layoutData;
+  const previous = CURRENT_LOCATION_MAP || new Map();
+  const { central, classificationDuplicates } = rebuildCentralMap(layoutData, CURRENT_QTY);
+  let changed = [];
+  central.forEach((row, loc) => {
+    const old = previous.get(loc);
+    if (!old || old.capacidade !== row.capacidade) changed.push({ loc, capacidadeAntiga: old ? old.capacidade : null, capacidadeNova: row.capacidade, tipo: row.tipoArmazenagem, familia: row.familia });
+  });
+  return { updatedCount: central.size, ignoredCount: [...layoutData.capacitiesByLoc.keys()].filter(loc => !central.has(loc)).length, unclassifiedCount: [...central.values()].filter(row => !row.classificado).length, changed, classificationDuplicates };
+}
+
 let CURRENT_GROUPS = GROUPS.map(g => ({ ...g }));
 let CURRENT_POSITIONS = POSITIONS.map(pos => pos.slice());
+let CURRENT_LAYOUT_DATA = null;
+let CURRENT_LOCATION_MAP = new Map();
+let LAST_AUDIT = null;
 
 function computeGroups(qtyByPos) {
+  const { central } = rebuildCentralMap(CURRENT_LAYOUT_DATA, qtyByPos);
   const agg = CURRENT_GROUPS.map(g => ({ tipo: g.tipo, familia: g.familia, capacidade: 0, ocupado: 0 }));
-  for (const [loc, gi, cap] of CURRENT_POSITIONS) {
-    if (!agg[gi]) continue;
-    agg[gi].capacidade += cap;
-    const qty = qtyByPos.get(loc) || 0;
-    agg[gi].ocupado += (qty > 0) ? Math.min(cap, qty) : 0;
-  }
+  central.forEach(row => {
+    const gi = CURRENT_GROUPS.findIndex(g => g.tipo === row.tipoArmazenagem && g.familia === row.familia);
+    if (gi === -1) return;
+    agg[gi].capacidade += row.capacidade;
+    agg[gi].ocupado += row.ocupado;
+  });
   return agg;
 }
 
-// Parses a family/capacity base file (xlsx or csv) with columns similar to:
-// Localização, almacen, TIPO DE ARMAZENAGEM, FAMILIA, CAPACIDADE (case/accent-insensitive, any column order)
+function auditData(qtyByPos, agg, layoutData = CURRENT_LAYOUT_DATA) {
+  const central = CURRENT_LOCATION_MAP;
+  const capDashboard = agg.reduce((s, r) => s + r.capacidade, 0);
+  const occDashboard = agg.reduce((s, r) => s + r.ocupado, 0);
+  const stockLocs = new Set(qtyByPos.keys());
+  const layoutLocs = layoutData ? new Set(layoutData.rawRowsByLoc.keys()) : new Set(central.keys());
+  const estoqueAusenteLayout = [...stockLocs].filter(loc => !layoutLocs.has(loc));
+  const layoutAusenteEstoque = [...layoutLocs].filter(loc => !stockLocs.has(loc));
+  const semClassificacao = [...central.values()].filter(row => !row.classificado);
+  const byArmazem = new Map();
+  central.forEach(r => { const a = armazemOf(r.tipoArmazenagem); byArmazem.set(a, (byArmazem.get(a) || 0) + r.capacidade); });
+  const subtotalTipo = agg.reduce((s, r) => s + r.capacidade, 0);
+  const subtotalFamilia = agg.reduce((s, r) => s + r.capacidade, 0);
+  const subtotalArmazem = [...byArmazem.values()].reduce((s, v) => s + v, 0);
+  const capLayout = [...central.values()].reduce((s, r) => s + r.capacidade, 0);
+  const audit = { totalLinhasEstoque: LAST_AUDIT?.totalLinhasEstoque || 0, totalLocalizacoesUnicasEstoque: stockLocs.size,
+    totalLinhasLayout: layoutData ? layoutData.totalRows : central.size, totalPosicoesValidasLayout: layoutData ? layoutData.validRows : central.size, totalLocalizacoesUnicasLayout: layoutLocs.size,
+    totalDuplicadasLayout: layoutData ? layoutData.duplicateLocations.length : 0, estoqueAusenteLayout: estoqueAusenteLayout.length,
+    layoutAusenteEstoque: layoutAusenteEstoque.length, somaCapacidadeBruta: layoutData ? layoutData.rawCapacitySum : capLayout,
+    somaCapacidadeAposDeduplicacao: layoutData ? layoutData.dedupedCapacitySum : capLayout, capacidadeTotalFinal: capDashboard,
+    somaOcupado: occDashboard, semClassificacao: semClassificacao.length, capacidadeMenosUm: layoutData ? layoutData.invalidMinusOneCount : 0,
+    capacidadeZero: layoutData ? layoutData.zeroCapacityCount : 0, linhasDescartadasLayout: layoutData ? layoutData.discardedRows : 0, motivosDescarteLayout: layoutData ? layoutData.discardReasons : new Map(), prefixCounts: layoutData ? layoutData.prefixCounts : { '1-': 0, '2-': 0, '3-': 0, '4-': 0 }, capacidadeCalculadaPeloLayout: capLayout,
+    capacidadeUtilizadaDashboard: capDashboard, diferenca: capLayout - capDashboard,
+    subtotalTipoOk: Math.abs(subtotalTipo - capDashboard) < 0.0001, subtotalArmazemOk: Math.abs(subtotalArmazem - capDashboard) < 0.0001,
+    subtotalFamiliaOk: Math.abs(subtotalFamilia - capDashboard) < 0.0001, conflitantes: layoutData ? layoutData.conflictingDuplicates : [] };
+  LAST_AUDIT = { ...LAST_AUDIT, ...audit };
+  console.info('Auditoria de capacidade do estoque', audit);
+  return audit;
+}
+
+function renderDiagnostics(audit) {
+  const el = document.getElementById('diagnostics');
+  if (!el || !audit) return;
+  el.textContent = [
+    'CAPACIDADE CALCULADA PELO LAYOUT: ' + fmt(audit.capacidadeCalculadaPeloLayout),
+    'CAPACIDADE UTILIZADA NO DASHBOARD: ' + fmt(audit.capacidadeUtilizadaDashboard),
+    'DIFERENÇA: ' + fmt(audit.diferenca),
+    'Linhas Estoque: ' + audit.totalLinhasEstoque + ' | Localizações únicas Estoque: ' + audit.totalLocalizacoesUnicasEstoque,
+    'Linhas lidas no Layout: ' + audit.totalLinhasLayout + ' | Posições válidas: ' + audit.totalPosicoesValidasLayout + ' | Localizações únicas válidas: ' + audit.totalLocalizacoesUnicasLayout,
+    'Prefixos válidos: 1-=' + audit.prefixCounts['1-'] + ' | 2-=' + audit.prefixCounts['2-'] + ' | 3-=' + audit.prefixCounts['3-'] + ' | 4-=' + audit.prefixCounts['4-'],
+    'Linhas descartadas: ' + audit.linhasDescartadasLayout + ' | Motivos: ' + ([...audit.motivosDescarteLayout.entries()].map(([motivo, qtd]) => motivo + '=' + qtd).join('; ') || 'nenhum'),
+    'Duplicadas Layout: ' + audit.totalDuplicadasLayout + ' | Estoque sem Layout: ' + audit.estoqueAusenteLayout + ' | Layout sem Estoque: ' + audit.layoutAusenteEstoque,
+    'Capacidade bruta: ' + fmt(audit.somaCapacidadeBruta) + ' | Após deduplicação: ' + fmt(audit.somaCapacidadeAposDeduplicacao),
+    'Ocupado: ' + fmt(audit.somaOcupado) + ' | Sem classificação: ' + audit.semClassificacao + ' | CAPACITY -1: ' + audit.capacidadeMenosUm + ' | CAPACITY 0: ' + audit.capacidadeZero,
+    'Subtotal por tipo = total: ' + (audit.subtotalTipoOk ? 'OK' : 'ERRO') + ' | Armazéns = total: ' + (audit.subtotalArmazemOk ? 'OK' : 'ERRO') + ' | Famílias = total: ' + (audit.subtotalFamiliaOk ? 'OK' : 'ERRO'),
+    audit.conflitantes.length ? 'ALERTA: duplicidades conflitantes no Layout: ' + audit.conflitantes.slice(0, 20).map(d => d.loc + ' [' + d.capacidades.join(' → ') + ']').join('; ') : 'Sem duplicidades conflitantes no Layout.'
+  ].join('\n');
+}
+
 function render(qtyByPos, meta) {
   const agg = computeGroups(qtyByPos);
-
   // group by tipo preserving order
   const byTipo = new Map();
   agg.forEach(r => {
@@ -445,13 +582,13 @@ function render(qtyByPos, meta) {
     document.getElementById('freshness').innerHTML =
       `<b>Datas de referência do estoque importado:</b> ${meta.minDate.toLocaleDateString('pt-BR')} a ${meta.maxDate.toLocaleDateString('pt-BR')}.`;
   }
+  renderDiagnostics(auditData(qtyByPos, agg));
 }
 
 // initial render with default (previously supplied) stock snapshot
-const defaultQtyMap = new Map(DEFAULT_QTY);
-render(defaultQtyMap, null);
-
+const defaultQtyMap = new Map(DEFAULT_QTY.map(([loc, qty]) => [normalizeLocation(loc), qty]));
 let CURRENT_QTY = defaultQtyMap;
+render(defaultQtyMap, null);
 
 document.getElementById('estoqueInput').addEventListener('change', function(e) {
   const file = e.target.files[0];
@@ -459,7 +596,8 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
   document.getElementById('fileState').textContent = 'Lendo ' + file.name + '...';
   const reader = new FileReader();
   reader.onload = function(ev) {
-    const { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn } = parseEstoqueCSV(ev.target.result);
+    const { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, totalRows } = parseEstoqueCSV(ev.target.result);
+    LAST_AUDIT = { ...(LAST_AUDIT || {}), totalLinhasEstoque: totalRows };
     CURRENT_QTY = qtyByPos;
     render(CURRENT_QTY, { minDate, maxDate });
     document.getElementById('fileState').textContent =
@@ -476,20 +614,26 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
 document.getElementById('layoutInput').addEventListener('change', function(e) {
   const file = e.target.files[0];
   if (!file) return;
-  document.getElementById('fileState').textContent = 'Lendo Layout ' + file.name + ' (somente capacidades)...';
+  document.getElementById('fileState').textContent = 'Lendo Layout ' + file.name + ' (substituindo capacidades)...';
   const reader = new FileReader();
   reader.onload = function(ev) {
     try {
-      const { capacitiesByLoc, invalidCount } = parseLayoutCSV(ev.target.result);
-      const { updatedCount, ignoredCount } = applyLayoutCapacities(capacitiesByLoc);
+      const layoutData = parseLayoutCSV(ev.target.result);
+      const { updatedCount, ignoredCount, unclassifiedCount, changed } = applyLayoutCapacities(layoutData);
       render(CURRENT_QTY, null);
       const ignoredMsg = ignoredCount
-        ? ' Posições não classificadas: ' + ignoredCount + ', não têm família cadastrada e foram ignoradas.'
+        ? ' Posições válidas não incluídas por erro de mapeamento: ' + ignoredCount + '.'
+        : '';
+      const unclassifiedMsg = unclassifiedCount
+        ? ' Posições válidas sem Tipo/Família: ' + unclassifiedCount + ', incluídas em SEM CLASSIFICAÇÃO.'
+        : '';
+      const conflictMsg = layoutData.conflictingDuplicates.length
+        ? ' ALERTA: ' + layoutData.conflictingDuplicates.length + ' localizações duplicadas com capacidades conflitantes; veja Diagnóstico.'
         : '';
       document.getElementById('fileState').textContent =
-        'Layout carregado: ' + file.name + ' — ' + updatedCount + ' capacidades atualizadas; ' +
-        invalidCount + ' posições com CAPACITY = -1 tratadas como inválidas/não armazenáveis. ' +
-        'Famílias e Tipos de Armazenagem preservados pelo mapa interno fixo.' + ignoredMsg;
+        'Layout carregado: ' + file.name + ' — ' + updatedCount + ' localizações válidas no mapa central; ' +
+        layoutData.invalidMinusOneCount + ' posições com CAPACITY = -1 e ' + layoutData.zeroCapacityCount + ' com CAPACITY = 0 tratadas como inválidas/não armazenáveis. ' +
+        'Novo Layout substituiu integralmente o mapa anterior; a coluna Quantidade de posições foi ignorada. Alterações de capacidade: ' + changed.length + '.' + ignoredMsg + unclassifiedMsg + conflictMsg;
     } catch (err) {
       document.getElementById('fileState').textContent = err.message;
     }
@@ -501,8 +645,10 @@ document.getElementById('clearBtn').addEventListener('click', function() {
   CURRENT_QTY = new Map();
   render(CURRENT_QTY, null);
   document.getElementById('fileState').textContent =
-    'Estoque limpo (capacidades atuais e famílias do mapa interno fixo continuam de pé). Importe um novo CSV de estoque para recalcular a ocupação.';
-});document.getElementById('pdfBtn').addEventListener('click', function() {
+    'Estoque limpo (capacidades atuais e famílias do mapa central continuam de pé). Importe um novo CSV de estoque para recalcular a ocupação.';
+});
+
+document.getElementById('pdfBtn').addEventListener('click', function() {
   document.getElementById('pdfHeader').innerHTML =
     '<h2>Ocupação de Estoque por Família — Grupo Sesé</h2>';
   window.print();
