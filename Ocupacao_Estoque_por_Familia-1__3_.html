@@ -60,11 +60,10 @@
 
   #pdfHeader { text-align:center; margin-bottom:14px; }
   #pdfHeader h2 { margin:0; color:var(--primary); font-size:18px; }
-  #pdfHeader .pdfdate { font-size:12px; color:var(--muted); margin-top:4px; }
 
   @media print {
     body { padding:0; background:#fff; }
-    .upload-bar, #pdfBtn, #clearBtn, .header { display:none !important; }
+    .upload-bar, #pdfBtn, #clearBtn, .header, .subtitle, .note, .legend { display:none !important; }
     #pdfHeader { display:block !important; }
     .app { max-width:100%; }
     .layout { grid-template-columns:1fr; display:block; }
@@ -493,11 +492,8 @@ document.getElementById('clearBtn').addEventListener('click', function() {
   document.getElementById('fileState').textContent =
     'Estoque limpo (capacidades atuais e famílias do mapa interno fixo continuam de pé). Importe um novo CSV de estoque para recalcular a ocupação.';
 });document.getElementById('pdfBtn').addEventListener('click', function() {
-  const now = new Date();
-  const dataHora = now.toLocaleDateString('pt-BR') + ' às ' + now.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
   document.getElementById('pdfHeader').innerHTML =
-    '<h2>Ocupação de Estoque por Família — Grupo Sesé</h2>' +
-    '<div class="pdfdate">Relatório gerado em ' + dataHora + '</div>';
+    '<h2>Ocupação de Estoque por Família — Grupo Sesé</h2>';
   window.print();
 });
 </script>
