@@ -303,18 +303,6 @@ function parseEstoqueCSV(text) {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
-    const m = line.match(QTY_RE);
-    if (m) {
-      const loc = m[1];
-      const fields = splitCSVLine(line);
-      const status = (fields[labelColIdx] || '').trim() ? 'OCUP' : 'LIVRE';
-      if (!qtyByPos.has(loc)) {
-        statusByPos.set(loc, status);
-        qtyByPos.set(loc, status === 'OCUP' ? Number.POSITIVE_INFINITY : 0);
-      }
-    } else {
-      const m2 = line.match(EMPTY_RE);
-      if (m2 && !qtyByPos.has(m2[1])) qtyByPos.set(m2[1], 0);
     }
     let dm;
     DATE_RE.lastIndex = 0;
