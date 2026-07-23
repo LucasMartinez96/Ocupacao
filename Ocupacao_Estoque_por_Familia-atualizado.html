@@ -254,21 +254,29 @@ function fmt(n) { return Math.round(n).toLocaleString('pt-BR'); }
 function fmtp(p) { return p.toFixed(2).replace('.', ',') + '%'; }
 function pctClass(p) { if (p >= 90) return 'pct-crit'; if (p >= 75) return 'pct-warn'; return 'pct-ok'; }
 
-// Tolerant CSV line parser: handles rows where the whole line got wrongly quoted
-// because of embedded commas inside DESCRIPTION. We only need position (name) and QUANTITY,
-// anchored by the REFERENCEDATE (dd/mm/yyyy hh:mm) pattern that always precedes QUANTITY.
-const QTY_RE = /^"?([0-9\-]+)"?,.*?\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2},(-?\d+(?:[.,]\d+)?),/;
-const EMPTY_RE = /^"?([0-9\-]+)"?,,+$/;
-const DATE_RE = /(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})/g;
-// STATUS só existe em alguns exports (ex.: BASE DE DADOS do WMS). Quando presente, os únicos
-// valores observados são OCUP / LIVRE. Detectamos o token em qualquer posição da linha para
-// não depender de um índice de coluna fixo (o layout de export varia).
-const STATUS_RE = /\b(OCUP|LIVRE)\b/i;
+// Parser simples de CSV com detecção automática de separador (vírgula, ponto-e-vírgula ou tab).
+// A nova regra de negócio usa somente posições únicas: Location identifica o endereço e Name
+// define ocupação (preenchido = Ocupada; vazio/nulo/branco = Vazia).
+function detectDelimiter(line) {
+  const candidates = [',', ';', '\t'];
+  let best = ',', bestCount = -1;
+  candidates.forEach(delim => {
+    let count = 0, inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') i++;
+        else inQuotes = !inQuotes;
+      } else if (!inQuotes && ch === delim) {
+        count++;
+      }
+    }
+    if (count > bestCount) { best = delim; bestCount = count; }
+  });
+  return best;
+}
 
-// Parser simples de uma linha CSV respeitando aspas (para conseguir isolar o valor exato
-// da coluna LABEL/ETIQUETA, já que essa coluna pode estar vazia e não dá pra "adivinhar"
-// por regex solto como fazemos com STATUS).
-function splitCSVLine(line) {
+function splitCSVLine(line, delimiter) {
   const result = [];
   let cur = '';
   let inQuotes = false;
@@ -283,7 +291,7 @@ function splitCSVLine(line) {
       }
     } else {
       if (ch === '"') inQuotes = true;
-      else if (ch === ',') { result.push(cur); cur = ''; }
+      else if (ch === delimiter) { result.push(cur); cur = ''; }
       else cur += ch;
     }
   }
@@ -291,63 +299,56 @@ function splitCSVLine(line) {
   return result;
 }
 
+function normHeader(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function findColumn(headers, names) {
+  const wanted = new Set(names.map(normHeader));
+  return headers.findIndex(h => wanted.has(normHeader(h)));
+}
+
+function findLocationColumn(headers) {
+  const exact = findColumn(headers, ['Location', 'Localização', 'Localizacao', 'Posição', 'Posicao', 'Endereço', 'Endereco', 'Address', 'Layout']);
+  if (exact !== -1) return exact;
+  const fuzzy = headers.findIndex(h => /(location|localizacao|posicao|endereco|address|layout)/i.test(normHeader(h)));
+  if (fuzzy !== -1) return fuzzy;
+  return findColumn(headers, ['Name']);
+}
+
 function parseEstoqueCSV(text) {
-  const lines = text.split(/\r?\n/);
-  const header = (lines[0] || '');
-  const headerCols = splitCSVLine(header).map(h => h.trim());
-  // Regra pedida pelo usuário (igual ao Excel =SE(F2="";"LIVRE";"OCUP")):
-  // se a coluna LABEL/ETIQUETA tiver conteúdo, a posição está OCUP; se estiver vazia, LIVRE.
-  const labelColIdx = headerCols.findIndex(h => /^(label|etiqueta)$/i.test(h));
-  const hasLabelColumn = labelColIdx !== -1;
-  const hasStatusColumn = !hasLabelColumn && /\bstatus\b/i.test(header);
-  const qtyByPos = new Map();
-  const statusByPos = new Map(); // loc -> 'OCUP' | 'LIVRE' | null
-  let minDate = null, maxDate = null;
+  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+  const header = (lines[0] || '').replace(/^\uFEFF/, '');
+  const delimiter = detectDelimiter(header);
+  const headerCols = splitCSVLine(header, delimiter).map(h => h.trim());
+  const locationColIdx = findLocationColumn(headerCols);
+  const nameColIdx = findColumn(headerCols, ['Name']);
+  if (locationColIdx === -1) throw new Error('Coluna de localização não encontrada no CSV.');
+  if (nameColIdx === -1) throw new Error('Coluna Name não encontrada no CSV.');
+
+  const positions = new Map();
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const m = line.match(QTY_RE);
-    if (m) {
-      const loc = m[1];
-      const qty = parseFloat(m[2].replace(',', '.'));
-
-      let statusOK = true; // por padrão, soma a quantidade (comportamento antigo)
-      if (hasLabelColumn) {
-        const fields = splitCSVLine(line);
-        const labelVal = (fields[labelColIdx] || '').trim();
-        const status = labelVal ? 'OCUP' : 'LIVRE';
-        statusByPos.set(loc, status);
-        // Se a etiqueta estiver vazia, a posição NÃO conta como ocupada, mesmo com saldo residual.
-        if (status === 'LIVRE') statusOK = false;
-      } else if (hasStatusColumn) {
-        const sm = line.match(STATUS_RE);
-        const status = sm ? sm[1].toUpperCase() : null;
-        if (status) statusByPos.set(loc, status);
-        // Regra: se o WMS marcou a posição como LIVRE, ela NÃO conta como ocupada,
-        // mesmo que ainda exista um saldo residual (arredondamento/pendência de baixa).
-        if (status === 'LIVRE') statusOK = false;
-      }
-
-      if (statusOK) {
-        qtyByPos.set(loc, (qtyByPos.get(loc) || 0) + (isFinite(qty) ? qty : 0));
-      } else if (!qtyByPos.has(loc)) {
-        qtyByPos.set(loc, 0);
-      }
-    } else {
-      const m2 = line.match(EMPTY_RE);
-      if (m2 && !qtyByPos.has(m2[1])) qtyByPos.set(m2[1], 0);
-    }
-    let dm;
-    DATE_RE.lastIndex = 0;
-    while ((dm = DATE_RE.exec(line)) !== null) {
-      const d = new Date(+dm[3], +dm[2]-1, +dm[1], +dm[4], +dm[5]);
-      if (!isNaN(d)) {
-        if (!minDate || d < minDate) minDate = d;
-        if (!maxDate || d > maxDate) maxDate = d;
-      }
-    }
+    const fields = splitCSVLine(lines[i], delimiter);
+    const loc = (fields[locationColIdx] || '').trim();
+    if (!loc) continue;
+    const nameValue = (fields[nameColIdx] || '').trim();
+    positions.set(loc, (positions.get(loc) || nameValue) ? 1 : 0);
   }
-  return { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, statusByPos };
+
+  const qtyByPos = new Map(positions);
+  return {
+    qtyByPos,
+    minDate: null,
+    maxDate: null,
+    hasStatusColumn: false,
+    hasLabelColumn: false,
+    locationColName: headerCols[locationColIdx],
+    nameColName: headerCols[nameColIdx]
+  };
 }
 
 // Mutable working copies so the base file can be swapped without touching the embedded defaults
@@ -359,8 +360,7 @@ function computeGroups(qtyByPos) {
   for (const [loc, gi, cap] of CURRENT_POSITIONS) {
     if (!agg[gi]) continue;
     agg[gi].capacidade += cap;
-    const qty = qtyByPos.get(loc) || 0;
-    agg[gi].ocupado += (qty > 0) ? Math.min(cap, qty) : 0;
+    agg[gi].ocupado += qtyByPos.get(loc) ? 1 : 0;
   }
   return agg;
 }
@@ -534,8 +534,10 @@ function renderRanking(mode) {
   }).join('') : '<p style="color:var(--muted);font-size:12.5px;">Sem famílias "RUA" cadastradas nos dados atuais.</p>';
 }
 
-// initial render with default (previously supplied) stock snapshot
-const defaultQtyMap = new Map(DEFAULT_QTY);
+// initial render starts empty; importing a CSV builds the unique-position base used by the dashboard.
+CURRENT_GROUPS = [{ tipo: 'ENDEREÇOS', familia: 'POSIÇÕES ÚNICAS' }];
+CURRENT_POSITIONS = [];
+const defaultQtyMap = new Map();
 render(defaultQtyMap, null);
 
 let CURRENT_QTY = defaultQtyMap;
@@ -546,25 +548,31 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
   document.getElementById('fileState').textContent = 'Lendo ' + file.name + '...';
   const reader = new FileReader();
   reader.onload = function(ev) {
-    const { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn } = parseEstoqueCSV(ev.target.result);
-    CURRENT_QTY = qtyByPos;
-    render(CURRENT_QTY, { minDate, maxDate });
-    document.getElementById('fileState').textContent =
-      'Carregado: ' + file.name + ' — ' + qtyByPos.size + ' posições lidas' +
-      (hasLabelColumn
-        ? ' (coluna LABEL/ETIQUETA detectada: posição com etiqueta preenchida = OCUP; vazia = LIVRE, mesmo com saldo residual).'
-        : hasStatusColumn
-        ? ' (coluna STATUS detectada: posições marcadas LIVRE não contam como ocupadas, mesmo com saldo residual).'
-        : ' (sem coluna LABEL/ETIQUETA ou STATUS neste arquivo — ocupação calculada só pela quantidade, como antes).');
+    try {
+      const { qtyByPos, minDate, maxDate, locationColName, nameColName } = parseEstoqueCSV(ev.target.result);
+      CURRENT_GROUPS = [{ tipo: 'ENDEREÇOS', familia: 'POSIÇÕES ÚNICAS' }];
+      CURRENT_POSITIONS = Array.from(qtyByPos.keys()).map(loc => [loc, 0, 1]);
+      CURRENT_QTY = qtyByPos;
+      render(CURRENT_QTY, { minDate, maxDate });
+      const occupied = Array.from(qtyByPos.values()).filter(Boolean).length;
+      const free = qtyByPos.size - occupied;
+      document.getElementById('fileState').textContent =
+        'Carregado: ' + file.name + ' — ' + qtyByPos.size + ' posições únicas lidas; ' +
+        occupied + ' ocupadas e ' + free + ' vazias. Localização: ' + locationColName + '; ocupação: ' + nameColName + '.';
+    } catch (err) {
+      document.getElementById('fileState').textContent = 'Erro ao carregar CSV: ' + err.message;
+    }
   };
   reader.readAsText(file, 'utf-8');
 });
 
 document.getElementById('clearBtn').addEventListener('click', function() {
   CURRENT_QTY = new Map();
+  CURRENT_GROUPS = [{ tipo: 'ENDEREÇOS', familia: 'POSIÇÕES ÚNICAS' }];
+  CURRENT_POSITIONS = [];
   render(CURRENT_QTY, null);
   document.getElementById('fileState').textContent =
-    'Estoque limpo (capacidade e famílias continuam de pé). Importe um novo CSV de estoque para recalcular a ocupação.';
+    'Dados limpos. Importe um CSV para calcular a ocupação por posições únicas usando somente a coluna Name.';
 });
 
 document.getElementById('pdfBtn').addEventListener('click', function() {
