@@ -290,16 +290,13 @@ function splitCSVLine(line) {
   result.push(cur);
   return result;
 }
-
 function parseEstoqueCSV(text) {
   const lines = text.split(/\r?\n/);
   const header = (lines[0] || '');
   const headerCols = splitCSVLine(header).map(h => h.trim());
-  // Regra pedida pelo usuário (igual ao Excel =SE(F2="";"LIVRE";"OCUP")):
-  // se a coluna LABEL/ETIQUETA tiver conteúdo, a posição está OCUP; se estiver vazia, LIVRE.
-  const labelColIdx = headerCols.findIndex(h => /^(label|etiqueta)$/i.test(h));
+  const labelColIdx = headerCols.findIndex(h => /^name$/i.test(h));
   const hasLabelColumn = labelColIdx !== -1;
-  const hasStatusColumn = !hasLabelColumn && /\bstatus\b/i.test(header);
+  const hasStatusColumn = false;
   const qtyByPos = new Map();
   const statusByPos = new Map(); // loc -> 'OCUP' | 'LIVRE' | null
   let minDate = null, maxDate = null;
@@ -309,29 +306,11 @@ function parseEstoqueCSV(text) {
     const m = line.match(QTY_RE);
     if (m) {
       const loc = m[1];
-      const qty = parseFloat(m[2].replace(',', '.'));
-
-      let statusOK = true; // por padrão, soma a quantidade (comportamento antigo)
-      if (hasLabelColumn) {
-        const fields = splitCSVLine(line);
-        const labelVal = (fields[labelColIdx] || '').trim();
-        const status = labelVal ? 'OCUP' : 'LIVRE';
+      const fields = splitCSVLine(line);
+      const status = (fields[labelColIdx] || '').trim() ? 'OCUP' : 'LIVRE';
+      if (!qtyByPos.has(loc)) {
         statusByPos.set(loc, status);
-        // Se a etiqueta estiver vazia, a posição NÃO conta como ocupada, mesmo com saldo residual.
-        if (status === 'LIVRE') statusOK = false;
-      } else if (hasStatusColumn) {
-        const sm = line.match(STATUS_RE);
-        const status = sm ? sm[1].toUpperCase() : null;
-        if (status) statusByPos.set(loc, status);
-        // Regra: se o WMS marcou a posição como LIVRE, ela NÃO conta como ocupada,
-        // mesmo que ainda exista um saldo residual (arredondamento/pendência de baixa).
-        if (status === 'LIVRE') statusOK = false;
-      }
-
-      if (statusOK) {
-        qtyByPos.set(loc, (qtyByPos.get(loc) || 0) + (isFinite(qty) ? qty : 0));
-      } else if (!qtyByPos.has(loc)) {
-        qtyByPos.set(loc, 0);
+        qtyByPos.set(loc, status === 'OCUP' ? Number.POSITIVE_INFINITY : 0);
       }
     } else {
       const m2 = line.match(EMPTY_RE);
@@ -552,10 +531,10 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
     document.getElementById('fileState').textContent =
       'Carregado: ' + file.name + ' — ' + qtyByPos.size + ' posições lidas' +
       (hasLabelColumn
-        ? ' (coluna LABEL/ETIQUETA detectada: posição com etiqueta preenchida = OCUP; vazia = LIVRE, mesmo com saldo residual).'
+        ? ' (coluna Name detectada: posição com Name preenchido = OCUP; vazio = LIVRE).'
         : hasStatusColumn
         ? ' (coluna STATUS detectada: posições marcadas LIVRE não contam como ocupadas, mesmo com saldo residual).'
-        : ' (sem coluna LABEL/ETIQUETA ou STATUS neste arquivo — ocupação calculada só pela quantidade, como antes).');
+        : ' (sem coluna Name neste arquivo — nenhuma posição importada conta como ocupada).');
   };
   reader.readAsText(file, 'utf-8');
 });
