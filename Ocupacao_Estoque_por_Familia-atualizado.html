@@ -295,7 +295,6 @@ function parseEstoqueCSV(text) {
   const header = (lines[0] || '');
   const headerCols = splitCSVLine(header).map(h => h.trim());
   const labelColIdx = headerCols.findIndex(h => /^name$/i.test(h));
-  const locColIdx = headerCols.findIndex(h => /^(position|location)$/i.test(h));
   const hasLabelColumn = labelColIdx !== -1;
   const hasStatusColumn = false;
   const qtyByPos = new Map();
@@ -304,12 +303,6 @@ function parseEstoqueCSV(text) {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
-    const fields = splitCSVLine(line);
-    const loc = (fields[locColIdx] || '').trim();
-    if (loc && !qtyByPos.has(loc)) {
-      const status = (fields[labelColIdx] || '').trim() ? 'OCUP' : 'LIVRE';
-      statusByPos.set(loc, status);
-      qtyByPos.set(loc, status === 'OCUP' ? Number.POSITIVE_INFINITY : 0);
     }
     let dm;
     DATE_RE.lastIndex = 0;
