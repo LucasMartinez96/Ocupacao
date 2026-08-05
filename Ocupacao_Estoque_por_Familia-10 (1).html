@@ -161,6 +161,8 @@
   .rank-tabs { display:flex; gap:8px; margin-bottom:12px; }
   .rank-tab { border:1px solid var(--border); background:var(--surface-2); padding:5px 11px; border-radius:999px; font-size:11.5px; font-weight:700; cursor:pointer; color:var(--muted); }
   .rank-tab.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+  .panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; border-bottom:1px solid var(--border); margin:0 0 14px; padding-bottom:10px; }
+  .panel-head h3 { margin:0; padding-bottom:0; border-bottom:none; }
 
   .note { font-size:12px; color:var(--muted); border-top:1px solid var(--border); margin-top:14px; padding-top:10px; line-height:1.5; }
   @media (max-width:1150px) { .kpis { grid-template-columns:repeat(3,1fr); } }
@@ -279,6 +281,16 @@
         </div>
         <div id="rankingBox" style="max-height:420px; overflow-y:auto;"></div>
       </div>
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-head">
+          <h3>Histórico mensal da ocupação diária</h3>
+          <button class="btn btn-danger" id="clearHistoryBtn">Limpar Histórico do Mês</button>
+        </div>
+        <table>
+          <thead><tr><th>Data</th><th class="num">% Ocupado</th><th class="num">% Livre</th></tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -327,10 +339,65 @@ const DATE_RE = /(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})/g;
 // valores observados são OCUP / LIVRE. Detectamos o token em qualquer posição da linha para
 // não depender de um índice de coluna fixo (o layout de export varia).
 const STATUS_RE = /\b(OCUP|LIVRE)\b/i;
+const HISTORY_STORAGE_KEY = 'ocupacaoHistoricoDiarioMensal';
 
 // Parser simples de uma linha CSV respeitando aspas (para conseguir isolar o valor exato
 // da coluna LABEL/ETIQUETA, já que essa coluna pode estar vazia e não dá pra "adivinhar"
 // por regex solto como fazemos com STATUS).
+
+function todayKey() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatHistoryDate(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('pt-BR');
+}
+
+function loadHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function saveHistory(history) {
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+}
+
+function updateDailyHistory(ocupadoPct, livrePct) {
+  const key = todayKey();
+  const history = loadHistory();
+  const existing = history.find(item => item && item.data === key);
+  if (existing) {
+    existing.ocupado = ocupadoPct;
+    existing.livre = livrePct;
+  } else {
+    history.push({ data: key, ocupado: ocupadoPct, livre: livrePct });
+  }
+  history.sort((a, b) => a.data.localeCompare(b.data));
+  saveHistory(history);
+  renderHistory();
+}
+
+function renderHistory() {
+  const body = document.getElementById('historyBody');
+  if (!body) return;
+  const month = todayKey().slice(0, 7);
+  const history = loadHistory().filter(item => item && item.data && item.data.slice(0, 7) === month);
+  body.innerHTML = history.length ? history.map(item => `<tr>
+    <td>${formatHistoryDate(item.data)}</td>
+    <td class="num ${pctClass(item.ocupado)}">${fmtp(item.ocupado)}</td>
+    <td class="num livre">${fmtp(item.livre)}</td>
+  </tr>`).join('') : '<tr><td colspan="3" style="color:var(--muted);font-size:12.5px;">Sem histórico registrado neste mês.</td></tr>';
+}
+
 function splitCSVLine(line) {
   const result = [];
   let cur = '';
@@ -626,6 +693,7 @@ function render(qtyByPos, meta) {
     .map(r => ({ nome: r.familia, pct: r.capacidade ? r.ocupado/r.capacidade*100 : 0 }));
   window.__RANKING_RUAS__ = ruaRows;
   renderRanking('crit');
+  updateDailyHistory(grandPct, grandPctLivre);
 }
 
 function renderRanking(mode) {
@@ -673,6 +741,14 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
         : ' (sem coluna NAME, LABEL/ETIQUETA ou STATUS neste arquivo — ocupação calculada só pela quantidade, como antes).');
   };
   reader.readAsText(file, 'utf-8');
+});
+
+document.getElementById('clearHistoryBtn').addEventListener('click', function() {
+  if (!confirm('Tem certeza que deseja limpar somente o histórico de ocupação diária deste mês?')) return;
+  const month = todayKey().slice(0, 7);
+  const history = loadHistory().filter(item => !item || !item.data || item.data.slice(0, 7) !== month);
+  saveHistory(history);
+  renderHistory();
 });
 
 document.getElementById('clearBtn').addEventListener('click', function() {
