@@ -99,7 +99,8 @@
   /* Zebra fina dentro de cada grupo para facilitar a leitura linha a linha. */
   tbody tr.tipo-grp-a:nth-of-type(even) td, tbody tr.tipo-grp-b:nth-of-type(even) td { filter:brightness(0.983); }
   tbody tr:hover td { background:var(--accent-bg) !important; filter:none; }
-  .tipo-cell { font-weight:700; vertical-align:top; border-right:2px solid var(--border); }
+  tbody tr.group-start td { border-top:3px solid #d5deeb; }
+  .tipo-cell { font-weight:800; vertical-align:top; border-right:3px solid #cbd5e1; box-shadow:inset 4px 0 0 var(--primary); }
   tbody tr.tipo-grp-a .tipo-cell { background:#eef1f7; }
   tbody tr.tipo-grp-b .tipo-cell { background:#e7edf6; }
   .tipo-badge { display:inline-flex; align-items:center; gap:5px; font-size:10px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; padding:2px 8px; border-radius:999px; margin-bottom:5px; white-space:nowrap; }
@@ -110,8 +111,8 @@
   .b-fab3 { background:var(--b-fab3-bg); color:var(--b-fab3); } .b-fab3 i { background:var(--b-fab3); }
   .b-axle { background:var(--b-axle-bg); color:var(--b-axle); } .b-axle i { background:var(--b-axle); }
   .b-outros { background:var(--b-outros-bg); color:var(--b-outros); } .b-outros i { background:var(--b-outros); }
-  .fam-cell { font-weight:600; }
-  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .fam-cell { font-weight:700; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; font-weight:700; }
   .livre { color:var(--muted); }
   .pct-ok, .pct-low { background:var(--low-bg); color:var(--low); font-weight:700; border-radius:6px; }
   .pct-warn, .pct-attn { background:var(--attn-bg); color:var(--attn); font-weight:700; border-radius:6px; }
@@ -122,6 +123,12 @@
   .pct-alta::before { content:'\1F7E0\00A0'; }
   .pct-crit::before { content:'\1F534\00A0'; }
   .subtotal td { background:var(--surface-2); font-weight:800; border-top:2px solid var(--border); border-bottom:2px solid var(--border); }
+  .history-compact td { background:#f8fafc; border-top:2px solid var(--border); border-bottom:1px solid var(--border); padding:10px 9px; }
+  .history-title { color:var(--primary); font-size:11px; font-weight:900; letter-spacing:.06em; text-transform:uppercase; }
+  .history-list { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+  .history-pill { display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:999px; padding:3px 8px; background:#fff; font-size:11.5px; font-weight:700; white-space:nowrap; }
+  .history-pill .date { color:var(--muted); font-weight:800; }
+  .history-empty { color:var(--muted); font-size:12.5px; font-weight:600; }
   .grand td { background:var(--primary); color:#fff; font-weight:900; font-size:14px; }
 
   /* ===== Donut / resumo ===== */
@@ -248,7 +255,10 @@
 
   <div class="layout">
     <div class="panel">
-      <h3>Ocupação por Tipo de Armazenagem x Família</h3>
+      <div class="panel-head">
+        <h3>Ocupação por Tipo de Armazenagem x Família</h3>
+        <button class="btn btn-danger" id="clearHistoryBtn">Limpar Histórico do Mês</button>
+      </div>
       <div>
       <table>
         <thead><tr>
@@ -256,6 +266,8 @@
           <th class="num">Ocupado</th><th class="num">Disponível</th><th class="num">% Ocupado</th><th class="num">% Livre</th>
         </tr></thead>
         <tbody id="tableBody"></tbody>
+        <tbody id="historyBody" class="history-compact-body"></tbody>
+        <tbody id="totalBody"></tbody>
       </table>
       </div>
     </div>
@@ -280,16 +292,6 @@
           <span class="rank-tab" data-rank="free">Mais livres</span>
         </div>
         <div id="rankingBox" style="max-height:420px; overflow-y:auto;"></div>
-      </div>
-      <div class="panel" style="margin-top:16px;">
-        <div class="panel-head">
-          <h3>Histórico mensal da ocupação diária</h3>
-          <button class="btn btn-danger" id="clearHistoryBtn">Limpar Histórico do Mês</button>
-        </div>
-        <table>
-          <thead><tr><th>Data</th><th class="num">% Ocupado</th><th class="num">% Livre</th></tr></thead>
-          <tbody id="historyBody"></tbody>
-        </table>
       </div>
     </div>
   </div>
@@ -391,11 +393,12 @@ function renderHistory() {
   if (!body) return;
   const month = todayKey().slice(0, 7);
   const history = loadHistory().filter(item => item && item.data && item.data.slice(0, 7) === month);
-  body.innerHTML = history.length ? history.map(item => `<tr>
-    <td>${formatHistoryDate(item.data)}</td>
-    <td class="num ${pctClass(item.ocupado)}">${fmtp(item.ocupado)}</td>
-    <td class="num livre">${fmtp(item.livre)}</td>
-  </tr>`).join('') : '<tr><td colspan="3" style="color:var(--muted);font-size:12.5px;">Sem histórico registrado neste mês.</td></tr>';
+  if (!history.length) {
+    body.innerHTML = '<tr class="history-compact"><td colspan="7"><span class="history-title">Histórico mensal:</span> <span class="history-empty">Sem histórico registrado neste mês.</span></td></tr>';
+    return;
+  }
+  const pills = history.map(item => `<span class="history-pill"><span class="date">${formatHistoryDate(item.data)}</span><span class="${pctClass(item.ocupado)}">${fmtp(item.ocupado)}</span><span class="livre">${fmtp(item.livre)} livre</span></span>`).join('');
+  body.innerHTML = `<tr class="history-compact"><td colspan="2"><span class="history-title">Histórico mensal</span></td><td colspan="5"><div class="history-list">${pills}</div></td></tr>`;
 }
 
 function splitCSVLine(line) {
@@ -570,16 +573,18 @@ function render(qtyByPos, meta, options = {}) {
       cells += `<td class="num">${fmt(disp)}</td>`;
       cells += `<td class="num ${cls}">${fmtp(pct)}</td>`;
       cells += `<td class="num livre">${fmtp(100-pct)}</td>`;
-      rowsHtml += `<tr class="${grpClass}">${cells}</tr>`;
+      rowsHtml += `<tr class="${grpClass}${idx === 0 ? ' group-start' : ''}">${cells}</tr>`;
     });
   });
 
   const grandPct = grandCap ? grandOcc/grandCap*100 : 0;
-  rowsHtml += `<tr class="grand"><td colspan="2">TOTAL GERAL</td>
+  const totalHtml = `<tr class="grand"><td colspan="2">TOTAL GERAL</td>
     <td class="num">${fmt(grandCap)}</td><td class="num">${fmt(grandOcc)}</td>
     <td class="num">${fmt(grandCap-grandOcc)}</td><td class="num">${fmtp(grandPct)}</td>
     <td class="num">${fmtp(100-grandPct)}</td></tr>`;
   document.getElementById('tableBody').innerHTML = rowsHtml;
+  document.getElementById('totalBody').innerHTML = totalHtml;
+  renderHistory();
 
   const grandDisp = grandCap - grandOcc;
   const grandPctLivre = 100 - grandPct;
@@ -869,13 +874,13 @@ async function exportPNG() {
         cells += `<td class="num">${fmt(disp)}</td>`;
         cells += `<td class="num ${cls}">${fmtp(pct)}</td>`;
         cells += `<td class="num livre">${fmtp(100-pct)}</td>`;
-        rowsHtml += `<tr class="${grpClass}">${cells}</tr>`;
+        rowsHtml += `<tr class="${grpClass}${idx === 0 ? ' group-start' : ''}">${cells}</tr>`;
       });
       grandCap += items.reduce((s,i) => s+i.capacidade, 0);
       grandOcc += items.reduce((s,i) => s+i.ocupado, 0);
     });
     const grandPct = grandCap ? grandOcc/grandCap*100 : 0;
-    rowsHtml += `<tr class="grand"><td colspan="2">TOTAL GERAL</td>
+    const totalHtml = `<tr class="grand"><td colspan="2">TOTAL GERAL</td>
       <td class="num">${fmt(grandCap)}</td><td class="num">${fmt(grandOcc)}</td>
       <td class="num">${fmt(grandCap-grandOcc)}</td><td class="num">${fmtp(grandPct)}</td>
       <td class="num">${fmtp(100-grandPct)}</td></tr>`;
@@ -906,7 +911,8 @@ async function exportPNG() {
         #exportRoot .b-fab3 { background:#eef6df; color:#5a8f1f; } #exportRoot .b-fab3 i { background:#5a8f1f; }
         #exportRoot .b-axle { background:#fbead9; color:#b5590a; } #exportRoot .b-axle i { background:#b5590a; }
         #exportRoot .b-outros { background:#eceef2; color:#5b6472; } #exportRoot .b-outros i { background:#5b6472; }
-        #exportRoot .fam-cell { font-weight:600; }
+        #exportRoot .fam-cell { font-weight:700; }
+        #exportRoot .num { font-weight:700; }
         #exportRoot .livre { color:#64748b; }
         #exportRoot .pct-ok { background:#dcf5e7; color:#15945a; font-weight:700; border-radius:6px; }
         #exportRoot .pct-warn { background:#fdf3d1; color:#c99a06; font-weight:700; border-radius:6px; }
@@ -917,6 +923,12 @@ async function exportPNG() {
         #exportRoot .pct-alta::before { content:'\\1F7E0\\00A0'; }
         #exportRoot .pct-crit::before { content:'\\1F534\\00A0'; }
         #exportRoot .dev-credit { position:absolute; right:10px; bottom:6px; font-size:9px; color:#94a3b8; }
+        #exportRoot .history-compact td { background:#f8fafc; border-top:2px solid #e2e8f0; padding:4px 6px; }
+        #exportRoot .history-title { color:#1e3a6e; font-size:9px; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }
+        #exportRoot .history-list { display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; }
+        #exportRoot .history-pill { display:inline-flex; align-items:center; gap:3px; border:1px solid #e2e8f0; border-radius:999px; padding:1px 5px; background:#fff; font-size:8.5px; font-weight:700; white-space:nowrap; }
+        #exportRoot .history-pill .date { color:#64748b; font-weight:800; }
+        #exportRoot .history-empty { color:#64748b; font-size:9px; font-weight:600; }
         #exportRoot .grand td { background:#1e3a6e; color:#fff; font-weight:900; }
         #exportRoot h2 { margin:0 0 2px; color:#1e3a6e; font-size:18px; }
         #exportRoot h3 { margin:0 0 6px; font-size:11.5px; color:#1e3a6e; text-transform:uppercase; letter-spacing:.05em; font-weight:800; }
@@ -950,6 +962,8 @@ async function exportPNG() {
               <th class="num">Ocupado</th><th class="num">Disponível</th><th class="num">% Ocupado</th><th class="num">% Livre</th>
             </tr></thead>
             <tbody>${rowsHtml}</tbody>
+            <tbody>${historyHtml}</tbody>
+            <tbody>${totalHtml}</tbody>
           </table>
         </div>
         <div>
@@ -961,13 +975,7 @@ async function exportPNG() {
             <h3>Resumo por Armazém</h3>
             ${resumoHtml}
           </div>
-          <div class="panel">
-            <h3>Histórico mensal da ocupação diária</h3>
-            <table>
-              <thead><tr><th>Data</th><th class="num">% Ocupado</th><th class="num">% Livre</th></tr></thead>
-              <tbody>${historyHtml}</tbody>
-            </table>
-          </div>
+
         </div>
       </div>
       <div class="dev-credit">Desenvolvido por Lucas Martinez</div>`;
