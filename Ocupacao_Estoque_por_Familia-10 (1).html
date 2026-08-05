@@ -536,7 +536,7 @@ function computeGroups(qtyByPos) {
 
 // Parses a family/capacity base file (xlsx or csv) with columns similar to:
 // Localização, almacen, TIPO DE ARMAZENAGEM, FAMILIA, CAPACIDADE (case/accent-insensitive, any column order)
-function render(qtyByPos, meta) {
+function render(qtyByPos, meta, options = {}) {
   const agg = computeGroups(qtyByPos);
 
   // group by tipo preserving order
@@ -693,7 +693,11 @@ function render(qtyByPos, meta) {
     .map(r => ({ nome: r.familia, pct: r.capacidade ? r.ocupado/r.capacidade*100 : 0 }));
   window.__RANKING_RUAS__ = ruaRows;
   renderRanking('crit');
-  updateDailyHistory(grandPct, grandPctLivre);
+  if (options.recordHistory) {
+    updateDailyHistory(grandPct, grandPctLivre);
+  } else {
+    renderHistory();
+  }
 }
 
 function renderRanking(mode) {
@@ -729,7 +733,7 @@ document.getElementById('estoqueInput').addEventListener('change', function(e) {
   reader.onload = function(ev) {
     const { qtyByPos, minDate, maxDate, hasStatusColumn, hasLabelColumn, hasNameColumn } = parseEstoqueCSV(ev.target.result);
     CURRENT_QTY = qtyByPos;
-    render(CURRENT_QTY, { minDate, maxDate });
+    render(CURRENT_QTY, { minDate, maxDate }, { recordHistory: true });
     document.getElementById('fileState').textContent =
       'Carregado: ' + file.name + ' — ' + qtyByPos.size + ' posições lidas (duplicadas removidas)' +
       (hasNameColumn
@@ -879,6 +883,7 @@ async function exportPNG() {
     const donutHtml = document.getElementById('donutWrap').innerHTML;
     const resumoHtml = document.getElementById('resumoBox').innerHTML;
     const kpiHtml = document.getElementById('kpiRow').innerHTML;
+    const historyHtml = document.getElementById('historyBody').innerHTML;
 
     const now = new Date();
     const dataHora = now.toLocaleDateString('pt-BR') + ' às ' + now.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
@@ -955,6 +960,13 @@ async function exportPNG() {
           <div class="panel">
             <h3>Resumo por Armazém</h3>
             ${resumoHtml}
+          </div>
+          <div class="panel">
+            <h3>Histórico mensal da ocupação diária</h3>
+            <table>
+              <thead><tr><th>Data</th><th class="num">% Ocupado</th><th class="num">% Livre</th></tr></thead>
+              <tbody>${historyHtml}</tbody>
+            </table>
           </div>
         </div>
       </div>
